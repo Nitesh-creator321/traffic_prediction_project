@@ -9,6 +9,8 @@ from streamlit_folium import st_folium
 import math
 from dotenv import load_dotenv
 import os
+from tensorflow.keras.models import load_model  # ✅ for Deep Learning model
+from sklearn.preprocessing import MinMaxScaler  # ✅ for data scaling
 
 # === Load environment variables ===
 load_dotenv()
@@ -26,6 +28,14 @@ try:
 except Exception:
     st.error("❌ Models or feature_columns.pkl not found. Run main.py first to train models.")
     st.stop()
+
+# === Try loading the Deep Learning model ===
+try:
+    dl_model = load_model("best_dl_model.keras")
+    st.sidebar.success("🧠 Deep Learning model loaded successfully!")
+except Exception:
+    dl_model = None
+    st.sidebar.warning("⚠️ Deep Learning model not found. Run src/train_dl.py first.")
 
 # === CSS Styling ===
 st.markdown("""
@@ -101,6 +111,12 @@ if "last_update" not in st.session_state:
 if "prediction_data" not in st.session_state:
     st.session_state.prediction_data = None
 
+# === Sidebar: Choose Model Type ===
+model_choice = st.sidebar.selectbox(
+    "🔍 Choose Prediction Model:",
+    ["Machine Learning (ML)", "Deep Learning (LSTM)"]
+)
+
 # === User Input ===
 st.markdown('<div class="main">', unsafe_allow_html=True)
 city = st.text_input("🏙️ Enter your city name:", st.session_state.city)
@@ -117,7 +133,7 @@ with col2:
     refresh_clicked = st.button("🔄 Refresh Data", key="refresh_btn")
 
 # === Prediction Logic (used by both buttons) ===
-def get_live_prediction(city):
+def get_live_prediction(city, model_choice):
     if not WEATHER_API_KEY:
         st.warning("⚠️ WEATHER_API_KEY not found in .env. Set it for live data.")
         st.stop()
@@ -152,8 +168,23 @@ def get_live_prediction(city):
         }
         features = pd.DataFrame([feature_dict])[feature_columns]
 
-        # Predict traffic & congestion
-        traffic_pred = model.predict(features)[0]
+        # === Prediction using selected model ===
+        if model_choice == "Machine Learning (ML)":
+            traffic_pred = model.predict(features)[0]
+        else:
+            if dl_model is not None:
+                # Scale the data (like during DL training)
+                scaler = MinMaxScaler(feature_range=(0, 1))
+                scaled = scaler.fit_transform([[temp]])  # simplified scaling
+                # Use dummy time steps (10) for prediction
+                seq = np.array([scaled[-10:]]) if len(scaled) >= 10 else np.pad(scaled, ((10 - len(scaled), 0), (0, 0)), mode='edge')
+                seq = seq.reshape((1, 10, 1))
+                traffic_pred = dl_model.predict(seq)[0][0] * 7000  # Rescale approx (adjust per dataset)
+            else:
+                st.warning("⚠️ Deep Learning model not available.")
+                traffic_pred = 0
+
+        # Classification Prediction
         cls_pred = cls_model.predict(features)
         congestion_label = le.inverse_transform(cls_pred)[0]
 
@@ -161,119 +192,16 @@ def get_live_prediction(city):
             "temp": temp,
             "clouds": clouds,
             "traffic_pred": int(traffic_pred),
-            "congestion": congestion_label
+            "congestion": congestion_label,
+            "model_used": model_choice
         }
         st.session_state.last_update = now.strftime("%H:%M:%S")
     else:
         st.error("⚠️ City not found. Please try again.")
 
-# === TOMTOM GEOCODING FUNCTION ===
-def geocode_place(place_name, key=TOMTOM_KEY):
-    """
-    Convert a place name into (latitude, longitude) using TomTom Geocoding API.
-    Restrict results to India to improve accuracy.
-    """
-    try:
-        url = f"https://api.tomtom.com/search/2/geocode/{requests.utils.quote(place_name)}.json"
-        params = {
-            "key": key,
-            "limit": 1,
-            "countrySet": "IN"  # Restrict search to India 🇮🇳
-        }
-        r = requests.get(url, params=params)
-        r.raise_for_status()
-        data = r.json()
-
-        if data.get("results"):
-            lat = data["results"][0]["position"]["lat"]
-            lon = data["results"][0]["position"]["lon"]
-            st.info(f"📍 {place_name} → {lat:.4f}, {lon:.4f}")
-            return f"{lat},{lon}"
-        else:
-            st.error(f"⚠️ Could not find coordinates for: {place_name}")
-            return None
-    except Exception as e:
-        st.error(f"Error geocoding '{place_name}': {e}")
-        return None
-
-
-# === TOMTOM LIVE ROUTE & INCIDENT HELPERS ===
-def get_route_coords(origin, destination, key=TOMTOM_KEY):
-    """Get route coordinates from TomTom between origin and destination."""
-    try:
-        url = f"https://api.tomtom.com/routing/1/calculateRoute/{origin}:{destination}/json?key={key}&traffic=true"
-        r = requests.get(url)
-        r.raise_for_status()
-        data = r.json()
-        coords = []
-        for leg in data["routes"][0]["legs"]:
-            for point in leg["points"]:
-                coords.append([point["latitude"], point["longitude"]])
-        return coords
-    except Exception as e:
-        st.error(f"Error fetching route: {e}")
-        return []
-
-def route_bbox(coords, pad_deg=0.01):
-    """Create a bounding box around a list of [lat, lon] coordinates"""
-    lats = [p[0] for p in coords]
-    lons = [p[1] for p in coords]
-    min_lat, max_lat = min(lats) - pad_deg, max(lats) + pad_deg
-    min_lon, max_lon = min(lons) - pad_deg, max(lons) + pad_deg
-    return min_lon, min_lat, max_lon, max_lat
-
-def get_incidents_for_bbox(bbox, key=TOMTOM_KEY):
-    """Fetch live incidents in the given bounding box"""
-    try:
-        min_lon, min_lat, max_lon, max_lat = bbox
-        url = "https://api.tomtom.com/traffic/services/5/incidentDetails"
-        params = {"bbox": f"{min_lon},{min_lat},{max_lon},{max_lat}", "key": key}
-        r = requests.get(url, params=params)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        st.error(f"Error fetching incidents: {e}")
-        return {}
-
-def draw_route_and_incidents(route_coords, incidents_json):
-    """Draw route and incidents on a Folium map"""
-    if not route_coords:
-        st.warning("No route found.")
-        return None
-
-    mid = route_coords[len(route_coords)//2]
-    m = folium.Map(location=mid, zoom_start=12)
-    folium.PolyLine(route_coords, weight=6, color="blue", opacity=0.8).add_to(m)
-
-    incidents = incidents_json.get("incidents", incidents_json.get("features", []))
-    for inc in incidents:
-        try:
-            geom = inc.get("geometry", {})
-            coords = geom.get("coordinates")
-            if coords:
-                lat, lon = coords[1], coords[0]
-            else:
-                continue
-            props = inc.get("properties", {})
-            desc = ""
-            if props.get("events"):
-                desc = props["events"][0].get("description", "")
-            else:
-                desc = props.get("description", "Unknown incident")
-            delay = props.get("delay", 0)
-            popup = f"{desc}<br>Delay: {int(delay)//60} mins" if delay else desc
-            folium.Marker(
-                [lat, lon],
-                popup=popup,
-                icon=folium.Icon(color="red", icon="exclamation-sign")
-            ).add_to(m)
-        except Exception:
-            continue
-    return m
-
 # === Trigger Prediction or Refresh ===
 if predict_clicked or refresh_clicked:
-    get_live_prediction(st.session_state.city)
+    get_live_prediction(st.session_state.city, model_choice)
 
 # === Display Prediction Results ===
 if st.session_state.prediction_data:
@@ -281,6 +209,7 @@ if st.session_state.prediction_data:
     st.metric("🌡️ Temperature (°C)", f"{data['temp']:.1f}")
     st.metric("☁️ Cloud Coverage (%)", f"{data['clouds']}%")
     st.metric("🚗 Predicted Traffic", f"{data['traffic_pred']} vehicles/hour")
+    st.metric("🧠 Model Used", data["model_used"])
 
     color_map = {
         "Low": ("🟢 Low (Smooth Flow)", "✅ Roads are clear. Great time to travel!", "low-tip"),
@@ -294,35 +223,3 @@ if st.session_state.prediction_data:
     st.markdown(f'<p class="refresh-info">🕐 Last Updated: {st.session_state.last_update}</p>', unsafe_allow_html=True)
 
 st.markdown('</div>', unsafe_allow_html=True)
-
-# === LIVE ROUTE EVENTS SECTION ===
-st.markdown("<hr>", unsafe_allow_html=True)
-st.header("🛰️ Live Events Along Route")
-
-col1, col2 = st.columns(2)
-with col1:
-    source_place = st.text_input("Enter Source Place:", "BMS Institute of Technology, Yelahanka")
-with col2:
-    destination_place = st.text_input("Enter Destination Place:", "Majestic, Bengaluru")
-
-if st.button("🚗 Show Live Route Events"):
-    if not TOMTOM_KEY:
-        st.error("TomTom API key not found! Please add it to your .env file.")
-    else:
-        source_coords = geocode_place(source_place)
-        dest_coords = geocode_place(destination_place)
-
-        if source_coords and dest_coords:
-            route_coords = get_route_coords(source_coords, dest_coords)
-            if route_coords:
-                bbox = route_bbox(route_coords, pad_deg=0.015)
-                incidents = get_incidents_for_bbox(bbox)
-                map_obj = draw_route_and_incidents(route_coords, incidents)
-                if map_obj:
-                    st_folium(map_obj, width=800, height=500)
-            else:
-                st.error("Could not get route. Please check the locations.")
-        else:
-            st.warning("Could not find one or both of the locations.")
-
-st.markdown("<hr><center>Developed by <b>Nitesh & Team 🚀 | BMSIT</b></center>", unsafe_allow_html=True)

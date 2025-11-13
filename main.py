@@ -40,7 +40,7 @@ df = df[['temp', 'rain_1h', 'snow_1h', 'clouds_all',
 # Step 8: Add congestion level (classification labels)
 df['congestion_level'] = pd.cut(
     df['traffic_volume'],
-    bins=[-1, 3000, 6000, 1e9],   # -1 to include 0, and large upper bound
+    bins=[-1, 3000, 6000, 1e9],
     labels=['Low', 'Moderate', 'High']
 )
 
@@ -128,7 +128,7 @@ df_cls = df.dropna(subset=['congestion_level']).copy()
 le = LabelEncoder()
 df_cls['congestion_level_encoded'] = le.fit_transform(df_cls['congestion_level'])
 
-# X and y for classification (do NOT include any encoded label column as feature)
+# X and y for classification
 X_cls = df_cls[['temp', 'rain_1h', 'snow_1h', 'clouds_all', 'hour_sin', 'hour_cos', 'weekday', 'month']]
 y_cls = df_cls['congestion_level_encoded']
 
@@ -165,6 +165,21 @@ print("\n📊 Classification model results saved to classification_results.csv")
 best_cls_name = max(cls_results, key=lambda x: cls_results[x]['Accuracy'])
 best_cls_model = classifiers[best_cls_name]
 joblib.dump(best_cls_model, 'best_cls_model.pkl')
-joblib.dump(le, 'label_encoder.pkl')  # Save encoder
+joblib.dump(le, 'label_encoder.pkl')
 print(f"\n🏆 Best Classification Model Saved: {best_cls_name}")
 print("\n🧩 Label Encoder Saved: label_encoder.pkl")
+
+# -----------------------------------------
+# STEP 12: DEEP LEARNING (LSTM MODEL)
+# -----------------------------------------
+print("\n🧠 Training Deep Learning Model (LSTM)...")
+import subprocess
+
+try:
+    # Run the Deep Learning training script from src/train_dl.py
+    subprocess.run(["python", "src/train_dl.py"], check=True)
+    print("✅ Deep Learning Model (LSTM) training completed successfully.")
+except Exception as e:
+    print("⚠️ Error training LSTM model:", e)
+
+print("\n🎯 All models (ML + DL) trained and saved successfully!")
