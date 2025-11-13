@@ -1,19 +1,23 @@
 import streamlit as st
 import requests
 import folium
+from math import radians, sin, cos, sqrt, atan2
 
 # =========================================
-# 🚗 Live Route Traffic (TomTom API - Manual Refresh)
+# 🚗 Live Route Traffic + Nearby Incidents (TomTom + Bing API)
 # =========================================
 
 st.set_page_config(page_title="🗺️ Live Route Traffic", layout="centered")
 
-# === TOMTOM API KEY ===
+# === API KEYS ===
 TOMTOM_API_KEY = "vVzbNRaFcTDVcNFbUY3agB3O8Srt7LKw"
 
+# Bing Maps API key — free tier (no billing)
+BING_API_KEY = "ArbiLKl9Ut-dummy-demo-key-123456"  # You can get your own from https://www.bingmapsportal.com/
+
 # === PAGE TITLE ===
-st.title("🗺️ Live Route Traffic (TomTom API)")
-st.write("View **real-time traffic congestion** between any two Bengaluru locations 🚦")
+st.title("🗺️ Live Route Traffic (TomTom + Bing Maps)")
+st.write("View **real-time congestion**, **accidents**, and **road closures** along your route 🚦")
 
 # === CSS Styling ===
 st.markdown("""
@@ -45,56 +49,53 @@ h1, h2, h3 {text-align: center; color: #00b4d8;}
 """, unsafe_allow_html=True)
 
 # === SESSION STATE INIT ===
-if "route" not in st.session_state:
-    st.session_state.route = None
-if "map_html" not in st.session_state:
-    st.session_state.map_html = None
-if "summary" not in st.session_state:
-    st.session_state.summary = None
-if "route_points" not in st.session_state:
-    st.session_state.route_points = None
-if "src" not in st.session_state:
-    st.session_state.src = None
-if "dest" not in st.session_state:
-    st.session_state.dest = None
-
+for key in ["route", "map_html", "summary", "route_points", "src", "dest", "incidents"]:
+    if key not in st.session_state:
+        st.session_state[key] = None
 
 # === Helper Functions ===
 def geocode(location):
     """Convert location name into coordinates using TomTom API."""
     try:
         url = f"https://api.tomtom.com/search/2/geocode/{location}.json?key={TOMTOM_API_KEY}"
-        data = requests.get(url).json()
+        data = requests.get(url, timeout=10).json()
         if data.get("results"):
             return data["results"][0]["position"]
-    except:
-        pass
+    except Exception as e:
+        st.error(f"⚠️ Geocoding error: {e}")
     return None
 
 
 def get_route(src, dest):
-    """Fetch the route between two coordinates."""
+    """Fetch route between two coordinates."""
     url = (
         f"https://api.tomtom.com/routing/1/calculateRoute/"
         f"{src['lat']},{src['lon']}:{dest['lat']},{dest['lon']}/json?traffic=true&key={TOMTOM_API_KEY}"
     )
-    res = requests.get(url).json()
-    if "routes" not in res:
+    try:
+        res = requests.get(url, timeout=10).json()
+        if "routes" not in res:
+            return None
+        return res["routes"][0]
+    except Exception as e:
+        st.error(f"⚠️ Error fetching route: {e}")
         return None
-    return res["routes"][0]
 
 
 def get_traffic(points):
-    """Fetch congestion levels at sampled route points."""
+    """Fetch congestion levels along route."""
     data = []
     checkpoints = points[::max(1, len(points)//6)]
     for p in checkpoints:
         lat, lon = p["latitude"], p["longitude"]
         url = f"https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/10/json?point={lat},{lon}&unit=KMPH&key={TOMTOM_API_KEY}"
-        resp = requests.get(url).json().get("flowSegmentData", {})
+        try:
+            resp = requests.get(url, timeout=10).json().get("flowSegmentData", {})
+        except:
+            continue
         if not resp:
             continue
-        curr, free = resp["currentSpeed"], resp["freeFlowSpeed"]
+        curr, free = resp.get("currentSpeed", 0), resp.get("freeFlowSpeed", 0)
         if free == 0:
             continue
         congestion = round((1 - curr / free) * 100, 1)
@@ -108,19 +109,101 @@ def get_traffic(points):
     return data
 
 
-def build_map(src, dest, points, traffic_data):
-    """Create folium map HTML."""
+def haversine(lat1, lon1, lat2, lon2):
+    """Calculate distance between two coordinates."""
+    R = 6371
+    dlat, dlon = radians(lat2 - lat1), radians(lon2 - lon1)
+    a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon/2)**2
+    return R * 2 * atan2(sqrt(a), sqrt(1 - a))
+
+
+def get_route_bbox(route_points, pad_deg=0.09):
+    """Create a bounding box (~10 km buffer)."""
+    lats = [p["latitude"] for p in route_points]
+    lons = [p["longitude"] for p in route_points]
+    return min(lons) - pad_deg, min(lats) - pad_deg, max(lons) + pad_deg, max(lats) + pad_deg
+
+
+def get_local_incidents(route_points):
+    """Fetch nearby incidents from Bing Maps API."""
+    min_lon, min_lat, max_lon, max_lat = get_route_bbox(route_points)
+    url = (
+        f"http://dev.virtualearth.net/REST/v1/Traffic/Incidents/"
+        f"{min_lat},{min_lon},{max_lat},{max_lon}"
+        f"?key={BING_API_KEY}"
+    )
+
+    try:
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+
+        nearby = []
+        for res in data.get("resourceSets", []):
+            for inc in res.get("resources", []):
+                title = inc.get("description", "Unknown incident")
+                severity = inc.get("severity", 1)
+                incident_type = inc.get("type", 1)
+                point = inc.get("point", {}).get("coordinates", [0, 0])
+                lat, lon = point[0], point[1]
+
+                # Filter incidents within 10 km of route
+                min_dist = min(haversine(lat, lon, p["latitude"], p["longitude"]) for p in route_points)
+                if min_dist <= 10:
+                    icons = {
+                        1: "🟢 Minor",
+                        2: "🟠 Moderate",
+                        3: "🔴 Major",
+                        4: "⚫ Critical"
+                    }
+                    types = {
+                        1: "Accident",
+                        2: "Congestion",
+                        3: "Disabled Vehicle",
+                        4: "Mass Transit",
+                        5: "Miscellaneous",
+                        6: "Other News",
+                        7: "Planned Event",
+                        8: "Road Hazard",
+                        9: "Construction",
+                        10: "Alert",
+                        11: "Weather"
+                    }
+                    nearby.append({
+                        "type": f"{types.get(incident_type, 'Incident')} ({icons.get(severity)})",
+                        "lat": lat,
+                        "lon": lon,
+                        "desc": title
+                    })
+        return nearby
+    except Exception as e:
+        st.warning(f"⚠️ Could not fetch Bing incidents: {e}")
+        return []
+
+
+def build_map(src, dest, points, traffic_data, incidents_list):
+    """Render folium map with incidents."""
     m = folium.Map(location=(src["lat"], src["lon"]), zoom_start=12)
-    folium.Marker((src["lat"], src["lon"]), popup="Source", icon=folium.Icon(color="green")).add_to(m)
-    folium.Marker((dest["lat"], dest["lon"]), popup="Destination", icon=folium.Icon(color="red")).add_to(m)
-    folium.PolyLine([(p["latitude"], p["longitude"]) for p in points], color="blue", weight=6).add_to(m)
+
+    folium.PolyLine([(p["latitude"], p["longitude"]) for p in points],
+                    color="blue", weight=6).add_to(m)
 
     for lat, lon, color, label, curr, free in traffic_data:
         folium.CircleMarker(
-            location=(lat, lon), radius=8, color=color,
-            fill=True, fill_opacity=0.9,
+            location=(lat, lon),
+            radius=7, color=color, fill=True,
             popup=f"{label} ({curr}/{free} km/h)"
         ).add_to(m)
+
+    for inc in incidents_list:
+        folium.Marker(
+            [inc["lat"], inc["lon"]],
+            popup=f"<b>{inc['type']}</b><br>{inc['desc']}",
+            icon=folium.Icon(color="red" if "Accident" in inc["type"] else "orange")
+        ).add_to(m)
+
+    folium.Marker((src["lat"], src["lon"]), popup="Source", icon=folium.Icon(color="green")).add_to(m)
+    folium.Marker((dest["lat"], dest["lon"]), popup="Destination", icon=folium.Icon(color="red")).add_to(m)
 
     return m._repr_html_()
 
@@ -139,9 +222,9 @@ if st.session_state.route is None:
                 src = geocode(src_input)
                 dest = geocode(dest_input)
                 if not src or not dest:
-                    st.error("❌ Location not found. Try again.")
+                    st.error("❌ Location not found.")
                 else:
-                    with st.spinner("Fetching route and live traffic..."):
+                    with st.spinner("Fetching route, traffic & incidents..."):
                         route = get_route(src, dest)
                         if not route:
                             st.error("❌ Could not find route.")
@@ -150,15 +233,18 @@ if st.session_state.route is None:
                             dist = route["summary"]["lengthInMeters"] / 1000
                             time_min = route["summary"]["travelTimeInSeconds"] / 60
                             traffic = get_traffic(points)
-                            map_html = build_map(src, dest, points, traffic)
+                            local_incidents = get_local_incidents(points)
+                            map_html = build_map(src, dest, points, traffic, local_incidents)
 
-                            # Save to session
-                            st.session_state.route = (src_input, dest_input)
-                            st.session_state.map_html = map_html
-                            st.session_state.summary = [t[3] for t in traffic]
-                            st.session_state.route_points = points
-                            st.session_state.src = src
-                            st.session_state.dest = dest
+                            st.session_state.update({
+                                "route": (src_input, dest_input),
+                                "map_html": map_html,
+                                "summary": [t[3] for t in traffic],
+                                "route_points": points,
+                                "src": src,
+                                "dest": dest,
+                                "incidents": local_incidents
+                            })
 
                             st.success(f"✅ Route from {src_input} → {dest_input}")
                             st.metric("📏 Distance (km)", f"{dist:.2f}")
@@ -174,28 +260,33 @@ if st.session_state.map_html:
     st.markdown("### 📊 Congestion Summary")
     st.write(" → ".join(st.session_state.summary))
 
-    # --- Refresh & Clear Buttons ---
+    local_incidents = st.session_state.get("incidents", [])
+    if local_incidents:
+        st.markdown("### ⚠️ Nearby Incidents (via Bing Maps)")
+        for i, inc in enumerate(local_incidents, 1):
+            st.write(f"**{i}.** {inc['type']} – {inc['desc']}")
+    else:
+        st.success("✅ No active incidents near your route!")
+
     col1, col2 = st.columns(2)
     with col1:
         st.markdown('<div class="refresh-btn">', unsafe_allow_html=True)
         if st.button("🔄 Refresh Live Data"):
-            with st.spinner("Fetching latest congestion levels..."):
+            with st.spinner("Refreshing..."):
                 traffic = get_traffic(st.session_state.route_points)
-                if traffic:
-                    st.session_state.map_html = build_map(
-                        st.session_state.src, st.session_state.dest, st.session_state.route_points, traffic
-                    )
-                    st.session_state.summary = [t[3] for t in traffic]
-                    st.success("✅ Traffic data updated!")
-                    st.rerun()
-                else:
-                    st.warning("⚠️ Could not fetch updated traffic data.")
+                local_incidents = get_local_incidents(st.session_state.route_points)
+                st.session_state.map_html = build_map(
+                    st.session_state.src, st.session_state.dest, st.session_state.route_points, traffic, local_incidents
+                )
+                st.session_state.summary = [t[3] for t in traffic]
+                st.session_state.incidents = local_incidents
+                st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
     with col2:
         st.markdown('<div class="clear-btn">', unsafe_allow_html=True)
         if st.button("🗑️ Clear & Choose New Route"):
-            for key in ["route", "map_html", "summary", "route_points", "src", "dest"]:
+            for key in ["route", "map_html", "summary", "route_points", "src", "dest", "incidents"]:
                 st.session_state[key] = None
             st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
