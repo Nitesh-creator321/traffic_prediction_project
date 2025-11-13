@@ -47,7 +47,7 @@ h2 {
 """, unsafe_allow_html=True)
 
 # === Main Layout ===
-st.markdown('<div class="main-container">', unsafe_allow_html=True)
+
 
 st.title("🚗 Smart Traffic & Route Predictor")
 st.write("""
@@ -63,7 +63,7 @@ Get real-time traffic predictions using live weather data and ML models.
 ✅ **Route Traffic Prediction:**  
 Find the best routes between locations with estimated distance and travel time.
 
-✅ **Analytics Dashboard (coming next):**  
+✅ **Analytics Dashboard:**  
 Visualize traffic insights, trends, and performance metrics.
 """)
 
@@ -79,12 +79,10 @@ Use the **sidebar** on the left to switch between:
 
 st.markdown("---")
 
-st.markdown("### 👨‍💻 Developed By")
+st.markdown("### 👨‍💻 Developed By NMMM")
 st.markdown("""
-<div class="team-box">
-<b>Nitesh & Team</b>  
-Department of Information Science & Engineering  
-BMS Institute of Technology & Management, Bengaluru
+<div class="team-box">  
+Department of Information Science & Engineering BMS Institute of Technology & Management, Bengaluru
 </div>
 """, unsafe_allow_html=True)
 
