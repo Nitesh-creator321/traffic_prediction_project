@@ -27,6 +27,17 @@ except Exception:
     st.error("❌ Models or feature_columns.pkl not found. Run main.py first to train models.")
     st.stop()
 
+<<<<<<< Updated upstream
+=======
+# === Try loading the Deep Learning model ===
+try:
+    dl_model = load_model("best_dl_model.keras")
+    st.sidebar.success("🧠 Models loaded successfully!")
+except Exception:
+    dl_model = None
+    st.sidebar.warning("⚠️ Model not found. Run src/train_dl.py first.")
+
+>>>>>>> Stashed changes
 # === CSS Styling ===
 st.markdown("""
 <style>
@@ -101,8 +112,13 @@ if "last_update" not in st.session_state:
 if "prediction_data" not in st.session_state:
     st.session_state.prediction_data = None
 
+<<<<<<< Updated upstream
+=======
+# === Sidebar: Choose Model Type ===
+
+
+>>>>>>> Stashed changes
 # === User Input ===
-st.markdown('<div class="main">', unsafe_allow_html=True)
 city = st.text_input("🏙️ Enter your city name:", st.session_state.city)
 st.session_state.city = city    # Store for refresh reuse
 
